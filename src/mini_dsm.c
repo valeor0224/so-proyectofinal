@@ -18,8 +18,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <stdint.h>  // <-- AGREGADO
-#include <stdbool.h> // <-- AGREGADO
+#include <stdint.h>  
+#include <stdbool.h> 
 #include <fcntl.h>
 #include <sys/time.h>
 
@@ -282,7 +282,7 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
         // Recibir el contenido de la página
         void *dst = region + (page_idx * PAGE_SIZE);
 
-        // 🔧 Permitir escritura temporal (evita “Bad address”)
+        // Permitir escritura temporal (evita “Bad address”)
         if (mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
             perror("mprotect temp write");
             exit(1);
@@ -293,7 +293,7 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
             exit(1);
         }
 
-        // 🔧 Dejar página solo de lectura (lectura compartida)
+        //Dejar página solo de lectura (lectura compartida)
         if (mprotect(dst, PAGE_SIZE, PROT_READ) != 0) {
             perror("mprotect read");
             exit(1);
