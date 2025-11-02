@@ -238,106 +238,119 @@ static int send_req_excl(int fd, uint8_t p)
 }
 
 /* SIGSEGV handler: intenta obtener página por red si es inválida */
-static void segv_handler(int sig, siginfo_t *si, void *unused)
-{
+// Handler de SIGSEGV: se activa cuando se accede a una página sin permisos
+static void segv_handler(int sig, siginfo_t *si, void *unused) {
     void *addr = si->si_addr;
     uintptr_t base = (uintptr_t)region;
     uintptr_t a = (uintptr_t)addr;
-    if (a < base || a >= base + REGION_SIZE)
-    {
-        // no es nuestro region: reinstalar default y re-lanzar
-        signal(SIGSEGV, SIG_DFL);
-        raise(SIGSEGV);
-        return;
+
+    if (a < base || a >= base + REGION_SIZE) {
+        fprintf(stderr, "[handler] acceso fuera de la región: %p\n", addr);
+        exit(1);
     }
-    size_t offset = a - base;
-    uint8_t pidx = offset / PAGE_SIZE;
-    printf("[node%d] SIGSEGV en addr %p page %u (estado local=%d)\n", my_id, addr, pidx, page_state[pidx]);
 
-    if (page_state[pidx] == ST_INVALID)
-    {
-        // solicitamos lectura al peer (asumimos peer es dueño inicial si my_id==1)
-        if (peer_fd < 0)
-        {
-            fprintf(stderr, "no hay peer_fd\n");
+    uint8_t page_idx = (a - base) / PAGE_SIZE;
+    if (page_idx >= NUM_PAGES) {
+        fprintf(stderr, "[handler] idx fuera de rango (%d)\n", page_idx);
+        exit(1);
+    }
+
+    // Mostrar información del fallo
+    printf("[node%d] SIGSEGV en addr %p page %d (estado local=%d)\n",
+           node_id, addr, page_idx, page_state[page_idx]);
+
+    // Si no tengo la página, debo pedirla
+    if (page_state[page_idx] == PAGE_INVALID) {
+        struct msg_hdr req = { MSG_REQ_READ, page_idx };
+        if (send_all(peer_fd, &req, sizeof(req)) < 0) {
+            perror("send REQ_READ");
             exit(1);
         }
-        // Si queremos escribir (si la instrucción que causó SIGSEGV era escritura), sería ideal detectar; simplificamos:
-        // Primero pedimos READ (migración). Si el proceso luego escribe, pedirá EXCL (otro fault).
-        if (send_req_read(peer_fd, pidx) < 0)
-        {
-            perror("send_req_read");
-            exit(1);
-        }
 
-        // Esperamos recibir SEND_PAGE (bloqueante)
-        // La recepción real es hecha por process_messages_once en el bucle principal; para simplicidad, bloqueamos aquí:
-        struct msg_hdr h;
-        if (recv_all(peer_fd, &h, sizeof(h)) < 0)
-        {
+        // Esperar respuesta: MSG_SEND_PAGE
+        struct msg_hdr resp;
+        if (recv_all(peer_fd, &resp, sizeof(resp)) < 0) {
             perror("recv hdr in handler");
             exit(1);
         }
-        if (h.type == MSG_SEND_PAGE && h.page_idx == pidx)
-        {
-            if (recv_all(peer_fd, region + pidx * PAGE_SIZE, PAGE_SIZE) < 0)
-            {
-                perror("recv payload in handler");
-                exit(1);
-            }
-            page_state[pidx] = ST_READ;
-            if (mprotect(region + pidx * PAGE_SIZE, PAGE_SIZE, PROT_READ) != 0)
-                perror("mprotect install read");
-            printf("[node%d] handler instaló page %u (READ).\n", my_id, pidx);
-            return; // volver al programa (reintento de instrucción)
-        }
-        else
-        {
-            fprintf(stderr, "esperaba SEND_PAGE en handler\n");
+        if (resp.type != MSG_SEND_PAGE || resp.page_idx != page_idx) {
+            fprintf(stderr, "[handler] respuesta inesperada: type=%d idx=%d\n",
+                    resp.type, resp.page_idx);
             exit(1);
         }
+
+        // Recibir el contenido de la página
+        void *dst = region + (page_idx * PAGE_SIZE);
+
+        // 🔧 Permitir escritura temporal (evita “Bad address”)
+        if (mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+            perror("mprotect temp write");
+            exit(1);
+        }
+
+        if (recv_all(peer_fd, dst, PAGE_SIZE) < 0) {
+            perror("recv payload in handler");
+            exit(1);
+        }
+
+        // 🔧 Dejar página solo de lectura (lectura compartida)
+        if (mprotect(dst, PAGE_SIZE, PROT_READ) != 0) {
+            perror("mprotect read");
+            exit(1);
+        }
+
+        page_state[page_idx] = PAGE_READ;
+        printf("[node%d] handler instaló page %d (READ)\n", node_id, page_idx);
+        return;
     }
-    else if (page_state[pidx] == ST_READ)
-    {
-        // acceso por escritura a página de solo lectura -> pedir exclusión
-        printf("[node%d] intento escribir page %u; pido EXCL\n", my_id, pidx);
-        if (send_req_excl(peer_fd, pidx) < 0)
-        {
-            perror("send_req_excl");
+
+    // Si tenía lectura pero necesito escribir, solicitar exclusividad
+    if (page_state[page_idx] == PAGE_READ) {
+        struct msg_hdr req = { MSG_REQ_EXCL, page_idx };
+        if (send_all(peer_fd, &req, sizeof(req)) < 0) {
+            perror("send REQ_EXCL");
             exit(1);
         }
-        // esperar SEND_PAGE con payload
-        struct msg_hdr h;
-        if (recv_all(peer_fd, &h, sizeof(h)) < 0)
-        {
-            perror("recv hdr for EXCL");
+
+        struct msg_hdr resp;
+        if (recv_all(peer_fd, &resp, sizeof(resp)) < 0) {
+            perror("recv hdr excl");
             exit(1);
         }
-        if (h.type == MSG_SEND_PAGE && h.page_idx == pidx)
-        {
-            if (recv_all(peer_fd, region + pidx * PAGE_SIZE, PAGE_SIZE) < 0)
-            {
-                perror("recv payload excl");
-                exit(1);
-            }
-            page_state[pidx] = ST_OWNER;
-            if (mprotect(region + pidx * PAGE_SIZE, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0)
-                perror("mprotect install rw");
-            printf("[node%d] handler instaló page %u (OWNER/RW).\n", my_id, pidx);
-            return;
-        }
-        else
-        {
-            fprintf(stderr, "esperaba SEND_PAGE tras EXCL\n");
+        if (resp.type != MSG_SEND_PAGE || resp.page_idx != page_idx) {
+            fprintf(stderr, "[handler] respuesta inesperada excl: type=%d idx=%d\n",
+                    resp.type, resp.page_idx);
             exit(1);
         }
+
+        void *dst = region + (page_idx * PAGE_SIZE);
+
+        // 🔧 permitir escritura temporal
+        if (mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+            perror("mprotect temp write excl");
+            exit(1);
+        }
+
+        if (recv_all(peer_fd, dst, PAGE_SIZE) < 0) {
+            perror("recv payload excl");
+            exit(1);
+        }
+
+        // 🔧 dejar en modo lectura+escritura (soy dueño exclusivo)
+        if (mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0) {
+            perror("mprotect final excl");
+            exit(1);
+        }
+
+        page_state[page_idx] = PAGE_OWNER;
+        printf("[node%d] handler instaló page %d (OWNER/RW)\n", node_id, page_idx);
+        return;
     }
-    else
-    {
-        fprintf(stderr, "estado inesperado en handler: %d\n", page_state[pidx]);
-        exit(1);
-    }
+
+    fprintf(stderr, "[handler] acceso inesperado, state=%d\n", page_state[page_idx]);
+    exit(1);
 }
+
 
 /* setup region y handler */
 static void setup_region_and_handler(bool owner_initial)
