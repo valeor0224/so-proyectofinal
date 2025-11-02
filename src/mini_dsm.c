@@ -239,6 +239,7 @@ static int send_req_excl(int fd, uint8_t p)
 
 /* SIGSEGV handler: intenta obtener página por red si es inválida */
 // Handler de SIGSEGV: se activa cuando se accede a una página sin permisos
+// Handler de SIGSEGV: se activa cuando se accede a una página sin permisos
 static void segv_handler(int sig, siginfo_t *si, void *unused) {
     void *addr = si->si_addr;
     uintptr_t base = (uintptr_t)region;
@@ -250,17 +251,16 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
     }
 
     uint8_t page_idx = (a - base) / PAGE_SIZE;
-    if (page_idx >= NUM_PAGES) {
+    if (page_idx >= N_PAGES) {
         fprintf(stderr, "[handler] idx fuera de rango (%d)\n", page_idx);
         exit(1);
     }
 
-    // Mostrar información del fallo
-    printf("[node%d] SIGSEGV en addr %p page %d (estado local=%d)\n",
-           node_id, addr, page_idx, page_state[page_idx]);
+    printf("[handler] SIGSEGV en addr %p page %d (estado local=%d)\n",
+           addr, page_idx, page_state[page_idx]);
 
     // Si no tengo la página, debo pedirla
-    if (page_state[page_idx] == PAGE_INVALID) {
+    if (page_state[page_idx] == ST_INVALID) {
         struct msg_hdr req = { MSG_REQ_READ, page_idx };
         if (send_all(peer_fd, &req, sizeof(req)) < 0) {
             perror("send REQ_READ");
@@ -299,13 +299,13 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
             exit(1);
         }
 
-        page_state[page_idx] = PAGE_READ;
-        printf("[node%d] handler instaló page %d (READ)\n", node_id, page_idx);
+        page_state[page_idx] = ST_READ;
+        printf("[handler] instaló page %d (READ)\n", page_idx);
         return;
     }
 
     // Si tenía lectura pero necesito escribir, solicitar exclusividad
-    if (page_state[page_idx] == PAGE_READ) {
+    if (page_state[page_idx] == ST_READ) {
         struct msg_hdr req = { MSG_REQ_EXCL, page_idx };
         if (send_all(peer_fd, &req, sizeof(req)) < 0) {
             perror("send REQ_EXCL");
@@ -342,14 +342,15 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
             exit(1);
         }
 
-        page_state[page_idx] = PAGE_OWNER;
-        printf("[node%d] handler instaló page %d (OWNER/RW)\n", node_id, page_idx);
+        page_state[page_idx] = ST_OWNER;
+        printf("[handler] instaló page %d (OWNER/RW)\n", page_idx);
         return;
     }
 
     fprintf(stderr, "[handler] acceso inesperado, state=%d\n", page_state[page_idx]);
     exit(1);
 }
+
 
 
 /* setup region y handler */
