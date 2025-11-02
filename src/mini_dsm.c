@@ -87,16 +87,27 @@ static ssize_t recv_all(int fd, void *buf, size_t len)
 }
 
 /* enviar page (payload) */
-static int send_page(int fd, uint8_t page_idx)
-{
+static int send_page(int fd, uint8_t page_idx) {
     struct msg_hdr h = {MSG_SEND_PAGE, page_idx};
-    if (send_all(fd, &h, sizeof(h)) < 0)
-        return -1;
+    if (send_all(fd, &h, sizeof(h)) < 0) return -1;
+
     void *src = region + (page_idx * PAGE_SIZE);
-    if (send_all(fd, src, PAGE_SIZE) < 0)
+
+    if (mprotect(src, PAGE_SIZE, PROT_READ) != 0) {
+        perror("mprotect temp read");
         return -1;
+    }
+
+    if (send_all(fd, src, PAGE_SIZE) < 0) return -1;
+
+    if (mprotect(src, PAGE_SIZE, PROT_NONE) != 0) {
+        perror("mprotect restore");
+        return -1;
+    }
+
     return 0;
 }
+
 
 /* procesar solicitudes entrantes (bucle simple, no-threaded). Retorna -1 en error */
 static int process_messages_once(int fd_other)
@@ -475,9 +486,7 @@ int main(int argc, char **argv)
     {
         peer_fd = connect_to(argv[2], argv[3]);
     }
-    // non-blocking recv for processing messages asynchronously
-    int flags = fcntl(peer_fd, F_GETFL, 0);
-    fcntl(peer_fd, F_SETFL, flags | O_NONBLOCK);
+
 
     // run demo actions shortly after
     if (!owner)
