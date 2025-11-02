@@ -1,8 +1,6 @@
 
 # so-proyectofinal
 
-
-# Mini DSM (page-level) - C / Ubuntu
 ## Compilar
 make
 ## Ejecutar (owner y peer en la misma máquina)
