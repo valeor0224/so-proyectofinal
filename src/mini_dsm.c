@@ -33,11 +33,24 @@
 #define PAGE_SIZE 4096
 #define REGION_SIZE (N_PAGES * PAGE_SIZE)
 
-typedef enum { ST_INVALID = 0, ST_READ, ST_OWNER } page_state_t;
+typedef enum
+{
+    ST_INVALID = 0,
+    ST_READ,
+    ST_OWNER
+} page_state_t;
 
-enum { MSG_REQ_READ = 1, MSG_REQ_EXCL = 2, MSG_SEND_PAGE = 3, MSG_INVALIDATE = 4, MSG_INVAL_ACK = 5 };
+enum
+{
+    MSG_REQ_READ = 1,
+    MSG_REQ_EXCL = 2,
+    MSG_SEND_PAGE = 3,
+    MSG_INVALIDATE = 4,
+    MSG_INVAL_ACK = 5
+};
 
-struct msg_hdr {
+struct msg_hdr
+{
     uint8_t type;
     uint8_t page_idx;
 };
@@ -48,90 +61,109 @@ static int peer_fd = -1;
 static int my_id = 0; // 0 = owner, 1 = peer
 
 /* ------------------- Utilidades de red ------------------- */
-static ssize_t send_all(int fd, const void *buf, size_t len) {
+static ssize_t send_all(int fd, const void *buf, size_t len)
+{
     size_t sent = 0;
     const char *b = buf;
-    while (sent < len) {
+    while (sent < len)
+    {
         ssize_t r = send(fd, b + sent, len - sent, 0);
-        if (r <= 0) return -1;
+        if (r <= 0)
+            return -1;
         sent += r;
     }
     return sent;
 }
 
-static ssize_t recv_all(int fd, void *buf, size_t len) {
+static ssize_t recv_all(int fd, void *buf, size_t len)
+{
     size_t got = 0;
     char *b = buf;
-    while (got < len) {
+    while (got < len)
+    {
         ssize_t r = recv(fd, b + got, len - got, 0);
-        if (r <= 0) return -1;
+        if (r <= 0)
+            return -1;
         got += r;
     }
     return got;
 }
 
 /* ------------------- Envío de páginas ------------------- */
-static int send_page(int fd, uint8_t page_idx) {
+static int send_page(int fd, uint8_t page_idx)
+{
     struct msg_hdr h = {MSG_SEND_PAGE, page_idx};
     printf("[Node%d][Protocolo] Enviando contenido de página %u al peer\n", my_id, page_idx);
-    if (send_all(fd, &h, sizeof(h)) < 0) return -1;
+    if (send_all(fd, &h, sizeof(h)) < 0)
+        return -1;
 
     void *src = region + (page_idx * PAGE_SIZE);
-    if (mprotect(src, PAGE_SIZE, PROT_READ) != 0) perror("mprotect temp read");
-    if (send_all(fd, src, PAGE_SIZE) < 0) return -1;
-    if (mprotect(src, PAGE_SIZE, PROT_NONE) != 0) perror("mprotect restore");
+    if (mprotect(src, PAGE_SIZE, PROT_READ) != 0)
+        perror("mprotect temp read");
+    if (send_all(fd, src, PAGE_SIZE) < 0)
+        return -1;
+    if (mprotect(src, PAGE_SIZE, PROT_NONE) != 0)
+        perror("mprotect restore");
     return 0;
 }
 
 /* ------------------- Procesar mensajes ------------------- */
-static int process_messages_once(int fd_other) {
+static int process_messages_once(int fd_other)
+{
     struct msg_hdr h;
     ssize_t r = recv(fd_other, &h, sizeof(h), MSG_DONTWAIT);
-    if (r == 0) return -1;
-    if (r < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    if (r == 0)
+        return -1;
+    if (r < 0)
+    {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
         perror("recv header");
         return -1;
     }
 
     uint8_t p = h.page_idx;
-    switch (h.type) {
-        case MSG_REQ_READ:
-            printf("[Node%d][Protocolo] Recibida solicitud de lectura (REQ_READ) para página %u\n", my_id, p);
-            if (page_state[p] == ST_OWNER) {
-                send_page(fd_other, p);
-                page_state[p] = ST_INVALID;
-                mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_NONE);
-                printf("[Node%d][Protocolo] Página %u migrada -> peer (propietario invalida su copia)\n", my_id, p);
-            }
-            break;
+    switch (h.type)
+    {
+    case MSG_REQ_READ:
+        printf("[Node%d][Protocolo] Recibida solicitud de lectura (REQ_READ) para página %u\n", my_id, p);
+        if (page_state[p] == ST_OWNER)
+        {
+            send_page(fd_other, p);
+            page_state[p] = ST_INVALID;
+            mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_NONE);
+            printf("[Node%d][Protocolo] Página %u migrada -> peer (propietario invalida su copia)\n", my_id, p);
+        }
+        break;
 
-        case MSG_REQ_EXCL:
-            printf("[Node%d][Protocolo] Recibida solicitud de escritura exclusiva (REQ_EXCL) para página %u\n", my_id, p);
-            if (page_state[p] == ST_OWNER) {
-                send_page(fd_other, p);
-                page_state[p] = ST_INVALID;
-                mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_NONE);
-                printf("[Node%d][Protocolo] Propiedad de página %u transferida al peer\n", my_id, p);
-            }
-            break;
+    case MSG_REQ_EXCL:
+        printf("[Node%d][Protocolo] Recibida solicitud de escritura exclusiva (REQ_EXCL) para página %u\n", my_id, p);
+        if (page_state[p] == ST_OWNER)
+        {
+            send_page(fd_other, p);
+            page_state[p] = ST_INVALID;
+            mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_NONE);
+            printf("[Node%d][Protocolo] Propiedad de página %u transferida al peer\n", my_id, p);
+        }
+        break;
 
-        case MSG_SEND_PAGE:
-            printf("[Node%d][Protocolo] Recibido contenido de página %u\n", my_id, p);
-            recv_all(fd_other, region + p * PAGE_SIZE, PAGE_SIZE);
-            page_state[p] = ST_READ;
-            mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_READ);
-            printf("[Node%d][Memoria] Página %u instalada localmente (modo LECTURA)\n", my_id, p);
-            break;
+    case MSG_SEND_PAGE:
+        printf("[Node%d][Protocolo] Recibido contenido de página %u\n", my_id, p);
+        recv_all(fd_other, region + p * PAGE_SIZE, PAGE_SIZE);
+        page_state[p] = ST_READ;
+        mprotect(region + p * PAGE_SIZE, PAGE_SIZE, PROT_READ);
+        printf("[Node%d][Memoria] Página %u instalada localmente (modo LECTURA)\n", my_id, p);
+        break;
 
-        default:
-            printf("[Node%d] Mensaje desconocido tipo %d\n", my_id, h.type);
+    default:
+        printf("[Node%d] Mensaje desconocido tipo %d\n", my_id, h.type);
     }
     return 0;
 }
 
 /* ------------------- Handler de fallos de página ------------------- */
-static void segv_handler(int sig, siginfo_t *si, void *unused) {
+static void segv_handler(int sig, siginfo_t *si, void *unused)
+{
     void *addr = si->si_addr;
     uintptr_t base = (uintptr_t)region;
     uintptr_t a = (uintptr_t)addr;
@@ -140,14 +172,16 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
     printf("\n[Node%d][Handler] SIGSEGV: acceso a dirección %p (página %u, estado actual=%d)\n",
            my_id, addr, page_idx, page_state[page_idx]);
 
-    if (page_state[page_idx] == ST_INVALID) {
+    if (page_state[page_idx] == ST_INVALID)
+    {
         struct msg_hdr req = {MSG_REQ_READ, page_idx};
         printf("[Node%d][Handler] Enviando solicitud REQ_READ al owner para página %u\n", my_id, page_idx);
         send_all(peer_fd, &req, sizeof(req));
 
         struct msg_hdr resp;
         recv_all(peer_fd, &resp, sizeof(resp));
-        if (resp.type == MSG_SEND_PAGE) {
+        if (resp.type == MSG_SEND_PAGE)
+        {
             void *dst = region + page_idx * PAGE_SIZE;
             mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE);
             recv_all(peer_fd, dst, PAGE_SIZE);
@@ -158,14 +192,16 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
         return;
     }
 
-    if (page_state[page_idx] == ST_READ) {
+    if (page_state[page_idx] == ST_READ)
+    {
         struct msg_hdr req = {MSG_REQ_EXCL, page_idx};
         printf("[Node%d][Handler] Enviando solicitud REQ_EXCL al owner (para escritura) página %u\n", my_id, page_idx);
         send_all(peer_fd, &req, sizeof(req));
 
         struct msg_hdr resp;
         recv_all(peer_fd, &resp, sizeof(resp));
-        if (resp.type == MSG_SEND_PAGE) {
+        if (resp.type == MSG_SEND_PAGE)
+        {
             void *dst = region + page_idx * PAGE_SIZE;
             mprotect(dst, PAGE_SIZE, PROT_READ | PROT_WRITE);
             recv_all(peer_fd, dst, PAGE_SIZE);
@@ -180,17 +216,22 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
 }
 
 /* ------------------- Inicialización ------------------- */
-static void setup_region_and_handler(bool owner_initial) {
+static void setup_region_and_handler(bool owner_initial)
+{
     region = mmap(NULL, REGION_SIZE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (region == MAP_FAILED) {
+    if (region == MAP_FAILED)
+    {
         perror("mmap");
         exit(1);
     }
 
-    for (int i = 0; i < N_PAGES; i++) page_state[i] = ST_INVALID;
+    for (int i = 0; i < N_PAGES; i++)
+        page_state[i] = ST_INVALID;
 
-    if (owner_initial) {
-        for (int i = 0; i < N_PAGES; i++) {
+    if (owner_initial)
+    {
+        for (int i = 0; i < N_PAGES; i++)
+        {
             page_state[i] = ST_OWNER;
             char *p = (char *)region + i * PAGE_SIZE;
             mprotect(p, PAGE_SIZE, PROT_READ | PROT_WRITE);
@@ -208,7 +249,8 @@ static void setup_region_and_handler(bool owner_initial) {
 }
 
 /* ------------------- Red ------------------- */
-static int start_server(const char *port) {
+static int start_server(const char *port)
+{
     struct addrinfo hints = {}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -228,7 +270,8 @@ static int start_server(const char *port) {
     return ac;
 }
 
-static int connect_to(const char *host, const char *port) {
+static int connect_to(const char *host, const char *port)
+{
     struct addrinfo hints = {}, *res;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -241,7 +284,8 @@ static int connect_to(const char *host, const char *port) {
 }
 
 /* ------------------- Demo ------------------- */
-static void demo_actions() {
+static void demo_actions()
+{
     sleep(1);
     printf("\n[Node1][Demo] Intentando leer página 0 (provocará migración de lectura)\n");
     char c = *((char *)(region + 0 * PAGE_SIZE));
@@ -254,8 +298,10 @@ static void demo_actions() {
 }
 
 /* ------------------- Main ------------------- */
-int main(int argc, char **argv) {
-    if (argc < 3) {
+int main(int argc, char **argv)
+{
+    if (argc < 3)
+    {
         fprintf(stderr, "Uso: %s owner <port> | %s peer <host> <port>\n", argv[0], argv[0]);
         return 1;
     }
@@ -266,24 +312,31 @@ int main(int argc, char **argv) {
     setup_region_and_handler(owner);
     peer_fd = owner ? start_server(argv[2]) : connect_to(argv[2], argv[3]);
 
-    if (!owner) {
+    if (!owner)
+    {
         pid_t pid = fork();
-        if (pid == 0) {
+        if (pid == 0)
+        {
             sleep(1);
             demo_actions();
+            print_summary(); 
+
             exit(0);
         }
     }
 
-    while (1) {
-        if (process_messages_once(peer_fd) < 0) break;
+    while (1)
+    {
+        if (process_messages_once(peer_fd) < 0)
+            break;
         usleep(100000);
     }
 
     printf("\n[Node%d][Resumen Final] Estado de las primeras 4 páginas:\n", my_id);
-    for (int i = 0; i < 4; i++) {
-        const char *st = (page_state[i] == ST_OWNER) ? "OWNER" :
-                         (page_state[i] == ST_READ)  ? "READ" : "INVALID";
+    for (int i = 0; i < 4; i++)
+    {
+        const char *st = (page_state[i] == ST_OWNER) ? "OWNER" : (page_state[i] == ST_READ) ? "READ"
+                                                                                            : "INVALID";
         printf("  Página %d -> %s\n", i, st);
     }
 
