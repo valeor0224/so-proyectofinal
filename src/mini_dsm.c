@@ -319,7 +319,7 @@ int main(int argc, char **argv)
         {
             sleep(1);
             demo_actions();
-            print_summary(); 
+            
 
             exit(0);
         }
@@ -339,6 +339,8 @@ int main(int argc, char **argv)
                                                                                             : "INVALID";
         printf("  Página %d -> %s\n", i, st);
     }
+
+    print_summary(); 
 
     close(peer_fd);
     return 0;
